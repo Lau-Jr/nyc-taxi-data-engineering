@@ -16,9 +16,8 @@ def validate_and_log_taxi_data(df: pd.DataFrame) -> pd.DataFrame:
 
     logging.info(f"Starting data quality check on {total_rows:,} rows...")
 
-    # Ensure datetime columns are correctly parsed
-    pickup_col = pd.to_datetime(df['tpep_pickup_datetime'])
-    dropoff_col = pd.to_datetime(df['tpep_dropoff_datetime'])
+    pickup_col = df['tpep_pickup_datetime']
+    dropoff_col = df['tpep_dropoff_datetime']
 
     # Define the 5 quality checks
     checks = {
@@ -49,5 +48,46 @@ def validate_and_log_taxi_data(df: pd.DataFrame) -> pd.DataFrame:
         f"Summary: Found {total_anomalies:,} total invalid rows ({ (total_anomalies/total_rows)*100 :.2f}%). "
         f"{total_rows - total_anomalies:,} rows are completely clean."
     )
-    
+
     return df
+
+
+# Hard-reject checks: the record cannot be analytically valid, so it is excluded from the
+# load and written to the rejected-rows log with a reason (docs/phase1 Problem B/C).
+HARD_REJECT_CHECKS = {
+    "missing_pickup_datetime": lambda df: df['tpep_pickup_datetime'].isna(),
+    "missing_dropoff_datetime": lambda df: df['tpep_dropoff_datetime'].isna(),
+    "missing_pickup_location": lambda df: df['PULocationID'].isna(),
+    "missing_dropoff_location": lambda df: df['DOLocationID'].isna(),
+    "dropoff_before_or_equal_pickup": lambda df: df['tpep_dropoff_datetime'] <= df['tpep_pickup_datetime'],
+}
+
+# Soft-anomaly checks: the record is kept and loaded, but flagged via fact_trip.is_anomaly
+# so downstream queries can include/exclude it explicitly instead of it being silently
+# dropped or silently biasing aggregates.
+SOFT_ANOMALY_CHECKS = {
+    "zero_or_missing_passenger_count": lambda df: df['passenger_count'].fillna(0) <= 0,
+    "zero_or_negative_trip_distance": lambda df: df['trip_distance'] <= 0,
+    "negative_fare_amount": lambda df: df['fare_amount'] < 0,
+    "negative_total_amount": lambda df: df['total_amount'] < 0,
+}
+
+
+def get_hard_reject_reasons(df: pd.DataFrame) -> pd.Series:
+    """
+    Returns a Series aligned to df.index: a comma-separated list of hard-reject reason
+    codes for rows that fail at least one hard check, and '' for rows that pass all of them.
+    """
+    reasons = pd.Series('', index=df.index, dtype=object)
+    for reason, check in HARD_REJECT_CHECKS.items():
+        mask = check(df)
+        reasons = reasons.where(~mask, reasons + ',' + reason)
+    return reasons.str.strip(',')
+
+
+def get_soft_anomaly_mask(df: pd.DataFrame) -> pd.Series:
+    """Returns a boolean Series: True if the row trips at least one soft-anomaly check."""
+    mask = pd.Series(False, index=df.index)
+    for check in SOFT_ANOMALY_CHECKS.values():
+        mask = mask | check(df)
+    return mask
