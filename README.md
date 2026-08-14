@@ -4,7 +4,7 @@ A re-runnable data pipeline for NYC TLC Yellow Taxi trip records: raw-data profi
 DuckDB star schema, and an idempotent Python ingester.
 
 - Phase 1 — [Data Problem Statement](docs/phase1/data_problem_statement.md)
-- Phase 2 — [Schema design](sql/)
+- Phase 2 — [Schema design](docs/phase2/schema_design.md), [data dictionary](docs/phase2/data_dictionary.md), [SQL](sql/)
 - Phase 3 — [Idempotency proof](docs/phase3/idempotency_proof.md)
 
 ## Run it
