@@ -8,3 +8,4 @@ logs/*.log
 logs/*.csv
 
 .venv/
+*/.ipynb_checkpoints/
