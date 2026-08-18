@@ -36,7 +36,7 @@ downstream revenue and occupancy metric.
 chargeback reversal records rather than random noise. These need to be segregated, not blindly
 deleted.
 
-**Problem C — Broken reference-code domains.**
+<!-- **Problem C — Broken reference-code domains.**
 The dataset uses foreign-key-style codes that don't match TLC's published dictionary:
 `RatecodeID = 99` appears on 110,864 rows (TLC defines only 1–6); `payment_type = 0` appears on
 1,088,058 rows (TLC defines only 1–6); `PULocationID` is 264 ("N/A") or 265 ("Unknown") on 5,930
@@ -46,4 +46,4 @@ the dimensions explicitly model "Unknown" members.
 By contrast, exact-row duplicates and duplicates on a deterministic 9-column business key
 (`VendorID`, pickup/dropoff timestamp, PU/DO location, passenger count, distance, fare, total)
 are both **zero** in this file — duplication is not a live problem here, but the absence of a
-native `trip_id` is still a modelling risk worth addressing in Phase 3.
+native `trip_id` is still a modelling risk worth addressing in Phase 3. -->
