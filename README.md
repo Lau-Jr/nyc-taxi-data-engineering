@@ -6,6 +6,7 @@ DuckDB star schema, and an idempotent Python ingester.
 - Phase 1 — [Data Problem Statement](docs/phase1/data_problem_statement.md)
 - Phase 2 — [Schema design](docs/phase2/schema_design.md), [data dictionary](docs/phase2/data_dictionary.md), [SQL](sql/)
 - Phase 3 — [Idempotency proof](docs/phase3/idempotency_proof.md)
+- Phase 5 — [Cloud pipeline design](docs/phase5/cloud_pipeline_design.md)
 
 ## Run it
 
@@ -74,3 +75,13 @@ passenger count, trip distance, fare amount, and total amount. `fact_trip.trip_i
 `UNIQUE`, and loads use `INSERT ... ON CONFLICT (trip_id) DO NOTHING`, so re-running the
 ingester on the same file is a no-op at the database level. Proof: see
 [docs/phase3/idempotency_proof.md](docs/phase3/idempotency_proof.md).
+
+## Cloud warehouse (Phase 5)
+
+A 100,000-row sample (`data/samples/yellow_tripdata_2026-01_sample100k.csv`) was loaded into
+a BigQuery sandbox table and queried with a top-10-by-revenue aggregate over `PULocationID`:
+**1.53 MB processed, 10 MB billed** — the gap is BigQuery's per-query minimum billing
+quantum, not extra data scanned. The full paper design for a production version of this
+pipeline (every box, every arrow, a cost note on each — tied back to that bytes-processed
+figure as the real cost driver) is in
+[docs/phase5/cloud_pipeline_design.md](docs/phase5/cloud_pipeline_design.md).
