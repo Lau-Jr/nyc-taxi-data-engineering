@@ -1,0 +1,27 @@
+# Phase 8: everything that decides what the feature table contains and how it is split.
+# Read by src/features.py and src/baseline.py, and copied into each snapshot's manifest.json,
+# so a snapshot records the exact settings that produced it.
+#
+# The split was fixed here and written up in docs/phase8/split_strategy.md BEFORE any
+# model or baseline was run. Changing it later spends the test set.
+
+[grid]
+# Inclusive date range of the zone x hour grid (every zone, every hour, zeros included).
+start = 2026-01-01
+end = 2026-02-28
+
+[split]
+# Rows before train_start have under 14 days of history, so their 7-day features are
+# incomplete. They are labelled "warmup" and not used for training or scoring.
+train_start = 2026-01-15
+validate_start = 2026-02-08
+test_start = 2026-02-18
+
+[calendar]
+# US federal holidays inside the grid (known a year in advance).
+public_holidays = [2026-01-01, 2026-01-19, 2026-02-16]
+
+[reproducibility]
+seed = 42
+# Days on which every build re-runs the truncation leakage check (src/features.py).
+leakage_check_days = [2026-01-20, 2026-02-10, 2026-02-20]
