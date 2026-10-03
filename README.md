@@ -9,6 +9,7 @@ DuckDB star schema, and an idempotent Python ingester.
 - Phase 5 — [Cloud pipeline design](docs/phase5/cloud_pipeline_design.md)
 - Phase 6 — [Quarantine proof](docs/phase6/quarantine_proof.md), [quality checks](#data-quality-handling), [data lineage](#data-lineage), [PDPA assessment](#pdpa-tanzania-assessment)
 - Phase 7 — [Serving layer](#serving-layer-phase-7), [metric definitions](metrics.md), [dashboard](streamlit_app.py), [freshness proof](docs/phase7/serving_proof.md)
+- Phase 8 — [Feature table](#ml-feature-table-phase-8), [split strategy](docs/phase8/split_strategy.md), [leakage audit](docs/phase8/leakage_audit.md), [datasheet](DATASHEET.md)
 
 ## Run it
 
@@ -32,6 +33,10 @@ same command again is safe — it inserts 0 new rows the second time (see
 [docs/phase3/idempotency_proof.md](docs/phase3/idempotency_proof.md)).
 
 Open the dashboard with `streamlit run streamlit_app.py` (or `make dashboard`).
+
+Rebuild the ML feature table and its snapshot with `python -m src.features` (or
+`make features`). That takes about 10 seconds from the warehouse and needs no re-ingest.
+Then score the baselines on validation with `python -m src.baseline` (or `make baseline`).
 
 Run tests with `python -m pytest tests/ -v` or `make test`.
 
@@ -154,6 +159,42 @@ pickup zone). Every consumer reads that table, never `fact_trip` or raw files:
   KPIs with daily sparklines, "how does daily demand move?", and "which pickup zones earn
   the most?". You can drill down from the whole city to one zone to its daily detail.
 
+## ML feature table (Phase 8)
+
+**Task:** forecast pickups per zone for every hour of the next day, with the prediction
+made at **00:00**. `features_zone_hour` (`sql/08_build_features_zone_hour.sql`) has one
+row per zone × hour: 262 zones × 1,416 hours = 370,992 rows. Hours with no pickups are
+explicit zeros.
+
+| Feature | Story |
+|---|---|
+| `hour_of_day`, `day_of_week`, `is_weekend` | Demand follows the clock and the week |
+| `is_public_holiday` | Holidays break the weekday pattern; the calendar is known a year ahead |
+| `trips_same_hour_lag_1d` | Same zone and hour yesterday: the freshest full day before midnight |
+| `trips_same_hour_lag_7d` | Same zone and hour a week ago: the weekly rhythm |
+| `trips_same_hour_mean_7d` | Mean of the last 7 days at this hour: smooths one-off days |
+| `zone_trips_prev_day` | The zone's whole previous day: its current activity level |
+| `zone_trips_trend_7d` | Last 7 days ÷ the 7 before: is the zone heating up or cooling down? |
+| `history_complete` | Flags rows whose 7-day features lack 14 days of history |
+
+- **Split, fixed before modelling:** by time, never at random. Warm-up is 1–14 Jan, train
+  15 Jan – 7 Feb, validate 8–17 Feb, and test 18–28 Feb, touched once. The boundaries are
+  in `config/features.toml`; the reasons (including why it isn't group-aware) are in
+  [docs/phase8/split_strategy.md](docs/phase8/split_strategy.md).
+- **Leakage:** every column is audited against "knowable at 00:00?" in
+  [docs/phase8/leakage_audit.md](docs/phase8/leakage_audit.md). Same-hour revenue
+  (r = 0.90 with the target) and same-hour dropoffs (r = 0.88) are cut. The audit also
+  runs **as code on every build**: the table is rebuilt from only the trips before
+  midnight of three check days, and the build fails if any feature changes.
+- **Reproducible:** `make features` writes an immutable, read-only
+  `data/features/<version>/features_zone_hour.parquet`. Its `manifest.json` records the
+  sha256, config, seed, source pipeline runs and git commit. Rebuilding from the same data
+  is byte-identical. Only the manifest is versioned in git.
+- **Bar to beat** (validation only, [results/phase8_baselines_validate.md](results/phase8_baselines_validate.md)):
+  "same hour last week" gives an MAE of **5.05** trips/hour. `train_profile`, a
+  zone × hour × weekend mean fitted on train rows only, gives 5.07.
+- **Dataset documentation:** [DATASHEET.md](DATASHEET.md).
+
 ## Data lineage
 
 Every table and every hop, from the TLC download to a query result:
@@ -179,6 +220,10 @@ data/raw/yellow_tripdata_YYYY-MM.parquet                       (raw, immutable, 
                 fact_trip  (data/processed/taxi.duckdb)
                   │
                   ├──► sql/04_analytical_queries.sql  →  Phase 2 demo query results
+                  │
+                  ├──► sql/08 via src/features.py (+ leakage check)  →  features_zone_hour
+                  │       → data/features/<version>/features_zone_hour.parquet + manifest.json
+                  │       → src/baseline.py  →  results/phase8_baselines_validate.md
                   │
                   │  sql/07 via database.refresh_marts, end of every successful run
                   ▼
@@ -217,6 +262,8 @@ Phase 5 top-10-by-revenue query  (docs/phase5/cloud_pipeline_design.md)
 | `fact_trip` | raw rows that passed every hard check | `transform.prepare_fact_rows` → `database.insert_fact_trips` | one row per unique `trip_id` |
 | `pipeline_run` | each invocation of `src/ingest.py` | `ingest.run` → `database.start_pipeline_run` / `finish_pipeline_run` (DDL `sql/06`) | one row per ingest run |
 | `mart_daily_zone_trips` | `fact_trip` ⋈ `dim_date`, `dim_location`, `dim_payment` | `database.refresh_marts` (`sql/07`), full rebuild after every successful run | one row per pickup date × pickup zone |
+| `features_zone_hour` | `fact_trip` ⋈ `dim_location`, trips before each forecast day's midnight | `src/features.py` (`sql/08`, settings in `config/features.toml`) | one row per pickup zone × hour |
+| `data/features/<version>/` | `features_zone_hour` | `features.write_snapshot`: read-only parquet + `manifest.json`, never edited | same as the table |
 | dashboard (`streamlit_app.py`) | `mart_daily_zone_trips` + `pipeline_run` only | `metrics.summarise`, `serving.get_freshness` | any roll-up of the mart's grain |
 | `data/samples/yellow_tripdata_2026-01_sample100k.csv` | 100,000 rows of the January raw parquet | one-off extract (the script is not in this repo) | one row per trip, raw columns, no validation |
 | BigQuery `trips_sample` | the sample CSV | manual console load | same as the sample CSV |
