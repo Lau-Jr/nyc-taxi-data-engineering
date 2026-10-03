@@ -17,16 +17,19 @@ def ensure_schema(con: duckdb.DuckDBPyConnection) -> None:
     Creates the star schema on first run only. sql/01_create_schema.sql drops and
     recreates every table, so it must NOT be re-run on every ingest call — doing so
     would wipe previously loaded data and break idempotency between runs.
+
+    sql/05_create_quarantine.sql is CREATE TABLE IF NOT EXISTS and runs every time, so a
+    database built before the quarantine table existed gains it without a rebuild.
     """
     exists = con.execute(
         "SELECT 1 FROM information_schema.tables WHERE table_name = 'fact_trip'"
     ).fetchone()
-    if exists:
-        return
+    if not exists:
+        for filename in ["01_create_schema.sql", "02_create_dimensions.sql", "03_create_fact.sql"]:
+            sql_text = (SQL_DIR / filename).read_text(encoding="utf-8")
+            con.execute(sql_text)
 
-    for filename in ["01_create_schema.sql", "02_create_dimensions.sql", "03_create_fact.sql"]:
-        sql_text = (SQL_DIR / filename).read_text(encoding="utf-8")
-        con.execute(sql_text)
+    con.execute((SQL_DIR / "05_create_quarantine.sql").read_text(encoding="utf-8"))
 
 
 def load_code_map(con: duckdb.DuckDBPyConnection, table: str, id_col: str, key_col: str) -> dict:
@@ -73,3 +76,29 @@ def insert_fact_trips(con: duckdb.DuckDBPyConnection, fact_rows: pd.DataFrame) -
 
 def fact_trip_count(con: duckdb.DuckDBPyConnection) -> int:
     return con.execute("SELECT COUNT(*) FROM fact_trip").fetchone()[0]
+
+
+def insert_quarantine_rows(con: duckdb.DuckDBPyConnection, quarantine_rows: pd.DataFrame) -> int:
+    """
+    Inserts hard-rejected rows into quarantine_trip, skipping any trip_id already
+    quarantined (so replaying a month is idempotent). Returns rows actually inserted.
+    """
+    if quarantine_rows.empty:
+        return 0
+    before = con.execute("SELECT COUNT(*) FROM quarantine_trip").fetchone()[0]
+
+    con.register("quarantine_batch", quarantine_rows)
+    columns = ", ".join(quarantine_rows.columns)
+    con.execute(f"""
+        INSERT INTO quarantine_trip ({columns})
+        SELECT {columns} FROM quarantine_batch
+        ON CONFLICT (trip_id) DO NOTHING
+    """)
+    con.unregister("quarantine_batch")
+
+    after = con.execute("SELECT COUNT(*) FROM quarantine_trip").fetchone()[0]
+    return after - before
+
+
+def quarantine_trip_count(con: duckdb.DuckDBPyConnection) -> int:
+    return con.execute("SELECT COUNT(*) FROM quarantine_trip").fetchone()[0]
