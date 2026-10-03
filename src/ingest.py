@@ -8,6 +8,10 @@ Idempotency: fact_trip.trip_id is a deterministic SHA-256 of a fixed set of raw 
 (src/transform.py::TRIP_ID_FIELDS) with a UNIQUE constraint, loaded via
 INSERT ... ON CONFLICT (trip_id) DO NOTHING. Running the same month twice inserts 0 new
 rows the second time (see docs/phase3/idempotency_proof.md).
+
+Quality gate: rows failing a hard check (src/validation.py::HARD_REJECT_CHECKS) go to
+quarantine_trip with their reason codes, the same way (ON CONFLICT (trip_id) DO NOTHING),
+and to logs/rejected_<month>.csv (see docs/phase6/quarantine_proof.md).
 """
 import argparse
 import logging
@@ -39,15 +43,27 @@ def configure_logging(month: str, log_dir: Path) -> None:
 
 
 def write_rejected_rows(rejected_df: pd.DataFrame, reasons: pd.Series, log_dir: Path, month: str) -> None:
+    """Writes trip_id + reason for every hard-rejected row. rejected_df must carry trip_id."""
     log_dir.mkdir(parents=True, exist_ok=True)
     out_path = log_dir / f"rejected_{month}.csv"
     if rejected_df.empty:
         pd.DataFrame(columns=["trip_id", "reason"]).to_csv(out_path, index=False)
         return
 
-    tagged = transform.add_trip_id(rejected_df)
-    out = pd.DataFrame({"trip_id": tagged["trip_id"], "reason": reasons.loc[rejected_df.index]})
+    out = pd.DataFrame({"trip_id": rejected_df["trip_id"], "reason": reasons.loc[rejected_df.index]})
     out.to_csv(out_path, index=False)
+
+
+def build_quarantine_rows(rejected_df: pd.DataFrame, reasons: pd.Series, raw_columns: list,
+                          source_file: str, month: str) -> pd.DataFrame:
+    """Shapes hard-rejected rows for quarantine_trip: raw columns + trip_id + reason/provenance."""
+    rows = rejected_df[raw_columns + ["trip_id"]].copy()
+    rows["reason_codes"] = reasons.loc[rejected_df.index]
+    rows["source_file"] = source_file
+    rows["ingest_month"] = month
+    # Two rejected rows can share a trip_id (e.g. a row and its duplicate_in_batch copy):
+    # quarantine the first, which is also what UNIQUE (trip_id) would keep.
+    return rows.drop_duplicates(subset="trip_id", keep="first")
 
 
 def run(month: str, raw_dir: Path, db_path: Path, log_dir: Path) -> dict:
@@ -59,37 +75,58 @@ def run(month: str, raw_dir: Path, db_path: Path, log_dir: Path) -> dict:
         raise FileNotFoundError(f"Raw file not found: {raw_path}")
 
     df = pd.read_parquet(raw_path)
+    raw_columns = list(df.columns)
     rows_read = len(df)
     logging.info(f"Rows read: {rows_read:,}")
 
-    reasons = validation.get_hard_reject_reasons(df)
-    reject_mask = reasons != ""
-    rejected_df = df[reject_mask]
-    valid_df = df[~reject_mask].copy()
-
-    rows_rejected = len(rejected_df)
-    rows_valid = len(valid_df)
-    logging.info(f"Rows valid: {rows_valid:,}")
-    logging.info(f"Rows rejected: {rows_rejected:,}")
-    write_rejected_rows(rejected_df, reasons, log_dir, month)
-
-    valid_df["is_anomaly"] = validation.get_soft_anomaly_mask(valid_df)
-    anomaly_count = int(valid_df["is_anomaly"].sum())
-    logging.info(f"Rows flagged as soft anomalies (loaded, not rejected): {anomaly_count:,}")
-
-    valid_df = transform.add_trip_id(valid_df)
-    valid_df = transform.add_date_key(valid_df)
+    validation.log_completeness(df)
+    df = transform.add_trip_id(df)
 
     con = database.get_connection(db_path)
     try:
         database.ensure_schema(con)
 
-        database.upsert_dim_date(con, transform.build_dim_date_rows(valid_df))
-        database.upsert_dim_location(con, transform.build_dim_location_rows(valid_df))
-
         vendor_map = database.load_code_map(con, "dim_vendor", "vendor_id", "vendor_key")
         payment_map = database.load_code_map(con, "dim_payment", "payment_type_id", "payment_type_key")
         rate_map = database.load_code_map(con, "dim_rate_code", "rate_code_id", "rate_code_key")
+
+        # Valid codes come from the seeded dims, so a code added to sql/02 is accepted here too.
+        check_ctx = validation.build_check_context(
+            month=month,
+            valid_vendor_ids=vendor_map.keys(),
+            valid_payment_types=payment_map.keys(),
+            valid_rate_codes=rate_map.keys(),
+        )
+        reasons = validation.get_hard_reject_reasons(df, check_ctx)
+        reject_mask = reasons != ""
+        rejected_df = df[reject_mask]
+        valid_df = df[~reject_mask].copy()
+
+        rows_rejected = len(rejected_df)
+        rows_valid = len(valid_df)
+        logging.info(f"Rows valid: {rows_valid:,}")
+        logging.info(f"Rows rejected: {rows_rejected:,}")
+        reason_counts = validation.count_reasons(reasons)
+        for reason, count in reason_counts.items():
+            logging.warning(
+                f"Quarantined [{validation.CHECK_DIMENSIONS[reason]}] {reason}: {count:,} rows"
+            )
+        write_rejected_rows(rejected_df, reasons, log_dir, month)
+
+        quarantine_rows = build_quarantine_rows(rejected_df, reasons, raw_columns, raw_path.name, month)
+        rows_quarantined = database.insert_quarantine_rows(con, quarantine_rows)
+        total_quarantine_rows = database.quarantine_trip_count(con)
+
+        valid_df["is_anomaly"] = validation.get_soft_anomaly_mask(valid_df)
+        anomaly_count = int(valid_df["is_anomaly"].sum())
+        logging.info(f"Rows flagged as soft anomalies (loaded, not rejected): {anomaly_count:,}")
+        for check_name, count in validation.get_soft_anomaly_counts(valid_df).items():
+            logging.info(f"  soft anomaly {check_name}: {count:,} rows")
+
+        valid_df = transform.add_date_key(valid_df)
+
+        database.upsert_dim_date(con, transform.build_dim_date_rows(valid_df))
+        database.upsert_dim_location(con, transform.build_dim_location_rows(valid_df))
 
         fact_rows = transform.prepare_fact_rows(valid_df, vendor_map, payment_map, rate_map)
         rows_inserted = database.insert_fact_trips(con, fact_rows)
@@ -98,6 +135,8 @@ def run(month: str, raw_dir: Path, db_path: Path, log_dir: Path) -> dict:
     finally:
         con.close()
 
+    logging.info(f"Rows quarantined (new this run): {rows_quarantined:,}")
+    logging.info(f"quarantine_trip row count after run: {total_quarantine_rows:,}")
     logging.info(f"Rows inserted: {rows_inserted:,}")
     logging.info(f"Rows skipped (already present): {rows_skipped:,}")
     logging.info(f"fact_trip row count after run: {total_fact_rows:,}")
@@ -107,9 +146,12 @@ def run(month: str, raw_dir: Path, db_path: Path, log_dir: Path) -> dict:
         "rows_read": rows_read,
         "rows_valid": rows_valid,
         "rows_rejected": rows_rejected,
+        "rows_quarantined": rows_quarantined,
+        "reject_reason_counts": reason_counts,
         "rows_inserted": rows_inserted,
         "rows_skipped": rows_skipped,
         "fact_trip_count": total_fact_rows,
+        "quarantine_trip_count": total_quarantine_rows,
     }
 
 
