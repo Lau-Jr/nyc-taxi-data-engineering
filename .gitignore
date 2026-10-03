@@ -9,3 +9,6 @@ logs/*.csv
 
 .venv/
 */.ipynb_checkpoints/
+
+# Phase 8 feature snapshots: data, rebuilt by `make features`; manifest.json is versioned
+data/features/**/*.parquet
