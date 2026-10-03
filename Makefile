@@ -1,4 +1,4 @@
-.PHONY: install ingest test dashboard clean
+.PHONY: install ingest test dashboard features baseline clean
 
 MONTH ?= 2026-01
 
@@ -10,6 +10,12 @@ ingest:
 
 dashboard:
 	streamlit run streamlit_app.py
+
+features:
+	python -m src.features
+
+baseline:
+	python -m src.baseline
 
 test:
 	python -m pytest tests/ -v

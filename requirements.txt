@@ -3,3 +3,4 @@ pyarrow
 duckdb
 numpy
 pytest
+streamlit>=1.57
