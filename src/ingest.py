@@ -12,6 +12,9 @@ rows the second time (see docs/phase3/idempotency_proof.md).
 Quality gate: rows failing a hard check (src/validation.py::HARD_REJECT_CHECKS) go to
 quarantine_trip with their reason codes, the same way (ON CONFLICT (trip_id) DO NOTHING),
 and to logs/rejected_<month>.csv (see docs/phase6/quarantine_proof.md).
+
+Serving: every successful run rebuilds mart_daily_zone_trips (sql/07), and every run,
+successful or not, is recorded in pipeline_run (see docs/phase7/serving_proof.md).
 """
 import argparse
 import logging
@@ -67,9 +70,46 @@ def build_quarantine_rows(rejected_df: pd.DataFrame, reasons: pd.Series, raw_col
 
 
 def run(month: str, raw_dir: Path, db_path: Path, log_dir: Path) -> dict:
+    """
+    Runs one ingest and records it in pipeline_run: 'running' at the start, then 'success'
+    or 'failed' (with the error). The dashboard's freshness label reads that table, so a
+    failed run is visible to consumers, not just in the log.
+    """
     configure_logging(month, log_dir)
     logging.info(f"Starting ingestion for month {month}")
 
+    con = database.get_connection(db_path)
+    try:
+        database.ensure_schema(con)
+        run_id = database.start_pipeline_run(con, month, pd.Timestamp.now())
+    finally:
+        con.close()
+
+    try:
+        summary = _ingest(month, raw_dir, db_path, log_dir)
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        logging.error(f"Ingestion FAILED (pipeline_run {run_id}): {error}")
+        con = database.get_connection(db_path)
+        try:
+            database.finish_pipeline_run(con, run_id, "failed", pd.Timestamp.now(), error=error)
+        finally:
+            con.close()
+        raise
+
+    con = database.get_connection(db_path)
+    try:
+        database.finish_pipeline_run(
+            con, run_id, "success", pd.Timestamp.now(),
+            rows_inserted=summary["rows_inserted"], mart_rows=summary["mart_rows"],
+        )
+    finally:
+        con.close()
+    summary["run_id"] = run_id
+    return summary
+
+
+def _ingest(month: str, raw_dir: Path, db_path: Path, log_dir: Path) -> dict:
     raw_path = raw_dir / f"yellow_tripdata_{month}.parquet"
     if not raw_path.exists():
         raise FileNotFoundError(f"Raw file not found: {raw_path}")
@@ -132,6 +172,9 @@ def run(month: str, raw_dir: Path, db_path: Path, log_dir: Path) -> dict:
         rows_inserted = database.insert_fact_trips(con, fact_rows)
         rows_skipped = rows_valid - rows_inserted
         total_fact_rows = database.fact_trip_count(con)
+
+        # Serving layer: rebuild the published mart from the full fact table (sql/07).
+        mart_rows = database.refresh_marts(con, pd.Timestamp.now())
     finally:
         con.close()
 
@@ -140,6 +183,7 @@ def run(month: str, raw_dir: Path, db_path: Path, log_dir: Path) -> dict:
     logging.info(f"Rows inserted: {rows_inserted:,}")
     logging.info(f"Rows skipped (already present): {rows_skipped:,}")
     logging.info(f"fact_trip row count after run: {total_fact_rows:,}")
+    logging.info(f"mart_daily_zone_trips refreshed: {mart_rows:,} rows")
     logging.info("Ingestion completed")
 
     return {
@@ -152,6 +196,7 @@ def run(month: str, raw_dir: Path, db_path: Path, log_dir: Path) -> dict:
         "rows_skipped": rows_skipped,
         "fact_trip_count": total_fact_rows,
         "quarantine_trip_count": total_quarantine_rows,
+        "mart_rows": mart_rows,
     }
 
 

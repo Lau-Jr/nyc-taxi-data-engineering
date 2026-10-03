@@ -18,8 +18,9 @@ def ensure_schema(con: duckdb.DuckDBPyConnection) -> None:
     recreates every table, so it must NOT be re-run on every ingest call — doing so
     would wipe previously loaded data and break idempotency between runs.
 
-    sql/05_create_quarantine.sql is CREATE TABLE IF NOT EXISTS and runs every time, so a
-    database built before the quarantine table existed gains it without a rebuild.
+    sql/05_create_quarantine.sql and sql/06_create_pipeline_run.sql are CREATE ... IF NOT
+    EXISTS and run every time, so a database built before those tables existed gains them
+    without a rebuild.
     """
     exists = con.execute(
         "SELECT 1 FROM information_schema.tables WHERE table_name = 'fact_trip'"
@@ -29,7 +30,8 @@ def ensure_schema(con: duckdb.DuckDBPyConnection) -> None:
             sql_text = (SQL_DIR / filename).read_text(encoding="utf-8")
             con.execute(sql_text)
 
-    con.execute((SQL_DIR / "05_create_quarantine.sql").read_text(encoding="utf-8"))
+    for filename in ["05_create_quarantine.sql", "06_create_pipeline_run.sql"]:
+        con.execute((SQL_DIR / filename).read_text(encoding="utf-8"))
 
 
 def load_code_map(con: duckdb.DuckDBPyConnection, table: str, id_col: str, key_col: str) -> dict:
@@ -102,3 +104,34 @@ def insert_quarantine_rows(con: duckdb.DuckDBPyConnection, quarantine_rows: pd.D
 
 def quarantine_trip_count(con: duckdb.DuckDBPyConnection) -> int:
     return con.execute("SELECT COUNT(*) FROM quarantine_trip").fetchone()[0]
+
+
+def start_pipeline_run(con: duckdb.DuckDBPyConnection, month: str, started_at: pd.Timestamp) -> int:
+    """Records a new ingest run as 'running' and returns its run_id."""
+    return con.execute(
+        "INSERT INTO pipeline_run (month, started_at, status) VALUES (?, ?, 'running') RETURNING run_id",
+        [month, started_at.to_pydatetime()],
+    ).fetchone()[0]
+
+
+def finish_pipeline_run(con: duckdb.DuckDBPyConnection, run_id: int, status: str,
+                        finished_at: pd.Timestamp, error: str = None,
+                        rows_inserted: int = None, mart_rows: int = None) -> None:
+    con.execute(
+        """
+        UPDATE pipeline_run
+        SET status = ?, finished_at = ?, error = ?, rows_inserted = ?, mart_rows = ?
+        WHERE run_id = ?
+        """,
+        [status, finished_at.to_pydatetime(), error, rows_inserted, mart_rows, run_id],
+    )
+
+
+def refresh_marts(con: duckdb.DuckDBPyConnection, refreshed_at: pd.Timestamp) -> int:
+    """
+    Rebuilds mart_daily_zone_trips from fact_trip (sql/07) and returns its row count.
+    A full rebuild is idempotent and takes about a second at this data size.
+    """
+    sql_text = (SQL_DIR / "07_refresh_mart_daily_zone_trips.sql").read_text(encoding="utf-8")
+    con.execute(sql_text, {"refreshed_at": refreshed_at.to_pydatetime()})
+    return con.execute("SELECT COUNT(*) FROM mart_daily_zone_trips").fetchone()[0]
