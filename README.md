@@ -10,6 +10,7 @@ DuckDB star schema, and an idempotent Python ingester.
 - Phase 6 — [Quarantine proof](docs/phase6/quarantine_proof.md), [quality checks](#data-quality-handling), [data lineage](#data-lineage), [PDPA assessment](#pdpa-tanzania-assessment)
 - Phase 7 — [Serving layer](#serving-layer-phase-7), [metric definitions](metrics.md), [dashboard](streamlit_app.py), [freshness proof](docs/phase7/serving_proof.md)
 - Phase 8 — [Feature table](#ml-feature-table-phase-8), [split strategy](docs/phase8/split_strategy.md), [leakage audit](docs/phase8/leakage_audit.md), [datasheet](DATASHEET.md)
+- Phase 9 — [Performance: profile, fix, before/after](docs/phase9/performance_report.md)
 
 ## Run it
 
@@ -194,6 +195,28 @@ explicit zeros.
   "same hour last week" gives an MAE of **5.05** trips/hour. `train_profile`, a
   zone × hour × weekend mean fitted on train rows only, gives 5.07.
 - **Dataset documentation:** [DATASHEET.md](DATASHEET.md).
+
+## Performance (Phase 9)
+
+Every ingest run now logs a timing for each step (`[timing]` lines; `step_seconds` in the
+run summary). `make profile` (`python -m src.profile_pipeline --month 2026-01 --label …`)
+profiles one full month into a fresh scratch database and writes the table to `results/`.
+
+- **Bottleneck:** `fact_insert`, at 338.6 s of an 836 s run (40%). `EXPLAIN ANALYZE` and
+  on-disk tests showed the cost was the six `FOREIGN KEY` constraints, which meant six
+  index lookups for every inserted row.
+- **One fix:** drop those constraints and enforce the same rule once per batch
+  (`database.check_fact_foreign_keys` refuses the whole batch on any unknown key). The
+  `UNIQUE (trip_id)` idempotency guarantee is kept.
+- **Proof:** `fact_insert` went from 338.6 s to **161.8 s** and the whole run from 836 s to
+  **635 s (−24%)**. The repeated benchmark (`python -m src.benchmark_fact_insert`, 3
+  interleaved runs) shows a median of 59.1 s → 31.6 s (**1.9×**).
+- **Nothing changed downstream:** all 47 tests pass, and the Phase 8 feature snapshot is
+  byte-identical.
+
+The next bottleneck is `add_trip_id` (247 s). Details, the paragraph on why the fix
+works, and its costs are in
+[docs/phase9/performance_report.md](docs/phase9/performance_report.md).
 
 ## Data lineage
 
