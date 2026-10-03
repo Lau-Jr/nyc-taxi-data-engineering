@@ -1,4 +1,4 @@
-.PHONY: install ingest test clean
+.PHONY: install ingest test dashboard clean
 
 MONTH ?= 2026-01
 
@@ -7,6 +7,9 @@ install:
 
 ingest:
 	python -m src.ingest --month $(MONTH)
+
+dashboard:
+	streamlit run streamlit_app.py
 
 test:
 	python -m pytest tests/ -v
