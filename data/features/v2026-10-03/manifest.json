@@ -1,0 +1,87 @@
+{
+  "version": "v2026-10-03",
+  "table": "features_zone_hour",
+  "file": "features_zone_hour.parquet",
+  "sha256": "fc6a6e6b9c352a0d4621d99a9c732967ec247a349b514e04d8e9d0a4a8d4d7d7",
+  "rows": 370992,
+  "rows_per_split": {
+    "warmup": 88032,
+    "train": 150912,
+    "validate": 62880,
+    "test": 69168
+  },
+  "zones": 262,
+  "key_columns": [
+    "zone_id",
+    "hour_start",
+    "forecast_date",
+    "prediction_made_at"
+  ],
+  "feature_columns": [
+    "hour_of_day",
+    "day_of_week",
+    "is_weekend",
+    "is_public_holiday",
+    "trips_same_hour_lag_1d",
+    "trips_same_hour_lag_7d",
+    "trips_same_hour_mean_7d",
+    "zone_trips_prev_day",
+    "zone_trips_trend_7d",
+    "history_complete"
+  ],
+  "target_column": "target_trips",
+  "split_column": "split",
+  "config": {
+    "grid": {
+      "start": "2026-01-01",
+      "end": "2026-02-28"
+    },
+    "split": {
+      "train_start": "2026-01-15",
+      "validate_start": "2026-02-08",
+      "test_start": "2026-02-18"
+    },
+    "calendar": {
+      "public_holidays": [
+        "2026-01-01",
+        "2026-01-19",
+        "2026-02-16"
+      ]
+    },
+    "reproducibility": {
+      "seed": 42,
+      "leakage_check_days": [
+        "2026-01-20",
+        "2026-02-10",
+        "2026-02-20"
+      ]
+    }
+  },
+  "source": {
+    "fact_trip_rows": 7039065,
+    "successful_pipeline_runs": [
+      {
+        "run_id": 1,
+        "month": "2026-01",
+        "finished_at": "2026-10-03 11:34:15.560889"
+      },
+      {
+        "run_id": 2,
+        "month": "2026-01",
+        "finished_at": "2026-10-03 11:45:00.022749"
+      },
+      {
+        "run_id": 5,
+        "month": "2026-02",
+        "finished_at": "2026-10-03 12:02:01.550641"
+      }
+    ]
+  },
+  "leakage_check_days": [
+    "2026-01-20",
+    "2026-02-10",
+    "2026-02-20"
+  ],
+  "git_commit": "68dc250da55023cace2d3c7db144e2d695902910-dirty",
+  "created_at": "2026-10-03T12:28:50"
+}
