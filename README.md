@@ -8,6 +8,7 @@ DuckDB star schema, and an idempotent Python ingester.
 - Phase 3 — [Idempotency proof](docs/phase3/idempotency_proof.md)
 - Phase 5 — [Cloud pipeline design](docs/phase5/cloud_pipeline_design.md)
 - Phase 6 — [Quarantine proof](docs/phase6/quarantine_proof.md), [quality checks](#data-quality-handling), [data lineage](#data-lineage), [PDPA assessment](#pdpa-tanzania-assessment)
+- Phase 7 — [Serving layer](#serving-layer-phase-7), [metric definitions](metrics.md), [dashboard](streamlit_app.py), [freshness proof](docs/phase7/serving_proof.md)
 
 ## Run it
 
@@ -24,10 +25,13 @@ make ingest MONTH=2026-01
 
 This creates `data/processed/taxi.duckdb`, applies the schema in `sql/` on first run,
 validates and loads `data/raw/yellow_tripdata_2026-01.parquet`, quarantines failing rows in
-the `quarantine_trip` table, and writes a summary to `logs/ingestion_2026-01.log` plus
+the `quarantine_trip` table, rebuilds the published `mart_daily_zone_trips` table, records
+the run in `pipeline_run`, and writes a summary to `logs/ingestion_2026-01.log` plus
 rejected rows to `logs/rejected_2026-01.csv`. Running the
 same command again is safe — it inserts 0 new rows the second time (see
 [docs/phase3/idempotency_proof.md](docs/phase3/idempotency_proof.md)).
+
+Open the dashboard with `streamlit run streamlit_app.py` (or `make dashboard`).
 
 Run tests with `python -m pytest tests/ -v` or `make test`.
 
@@ -124,6 +128,32 @@ pipeline (every box, every arrow, a cost note on each — tied back to that byte
 figure as the real cost driver) is in
 [docs/phase5/cloud_pipeline_design.md](docs/phase5/cloud_pipeline_design.md).
 
+## Serving layer (Phase 7)
+
+The pipeline publishes **one** curated table, `mart_daily_zone_trips` (grain: pickup date ×
+pickup zone). Every consumer reads that table, never `fact_trip` or raw files:
+
+- **Refreshed by the pipeline itself.** `src/ingest.py` rebuilds it at the end of every
+  successful run (`sql/07_refresh_mart_daily_zone_trips.sql`, `CREATE OR REPLACE`, so the
+  rebuild is idempotent). Every run, successful or failed, is recorded in `pipeline_run`.
+- **Metrics defined once.** [metrics.md](metrics.md) gives each published number's
+  formula, grain, filters and owner, and [src/metrics.py](src/metrics.py) is the only code
+  that computes them. The mart stores only additive counts and sums, so any roll-up is
+  exact. Defining the metrics surfaced two problems that every consumer would otherwise
+  have hit separately:
+  - the Phase 2 queries' `is_anomaly = FALSE` filter drops 32% of trips and $34.9M of
+    January revenue;
+  - 161 odometer errors hold 48% of all recorded miles.
+- **Freshness label computed from the data.** `src/serving.py::get_freshness` reads
+  `MAX(last_pickup_datetime)` and `refreshed_at` from the mart, and the latest run from
+  `pipeline_run`. When the latest run failed, or has been stuck in `running` for more than
+  2 hours, the dashboard banner turns amber and says what is stale. Proof, with
+  screenshots of the label breaking and recovering:
+  [docs/phase7/serving_proof.md](docs/phase7/serving_proof.md).
+- **Consumer view.** [streamlit_app.py](streamlit_app.py) shows a freshness banner, six
+  KPIs with daily sparklines, "how does daily demand move?", and "which pickup zones earn
+  the most?". You can drill down from the whole city to one zone to its daily detail.
+
 ## Data lineage
 
 Every table and every hop, from the TLC download to a query result:
@@ -148,8 +178,17 @@ data/raw/yellow_tripdata_YYYY-MM.parquet                       (raw, immutable, 
                   ▼
                 fact_trip  (data/processed/taxi.duckdb)
                   │
+                  ├──► sql/04_analytical_queries.sql  →  Phase 2 demo query results
+                  │
+                  │  sql/07 via database.refresh_marts, end of every successful run
                   ▼
-                sql/04_analytical_queries.sql  →  query results
+                mart_daily_zone_trips   (serving layer: the one published table)
+                  │  + pipeline_run      (one row per ingest run: success / failed)
+                  │
+                  │  src/metrics.py::summarise   (metric formulas, metrics.md)
+                  │  src/serving.py::get_freshness
+                  ▼
+                streamlit_app.py  (dashboard: KPIs, trend, top zones, freshness label)
 
 Side branch (Phase 5):
 data/raw/yellow_tripdata_2026-01.parquet
@@ -176,6 +215,9 @@ Phase 5 top-10-by-revenue query  (docs/phase5/cloud_pipeline_design.md)
 | `dim_payment` | TLC data dictionary + observed code 0 | seeded by `sql/02_create_dimensions.sql` | one row per payment code |
 | `dim_rate_code` | TLC data dictionary + observed code 99 | seeded by `sql/02_create_dimensions.sql` | one row per rate code |
 | `fact_trip` | raw rows that passed every hard check | `transform.prepare_fact_rows` → `database.insert_fact_trips` | one row per unique `trip_id` |
+| `pipeline_run` | each invocation of `src/ingest.py` | `ingest.run` → `database.start_pipeline_run` / `finish_pipeline_run` (DDL `sql/06`) | one row per ingest run |
+| `mart_daily_zone_trips` | `fact_trip` ⋈ `dim_date`, `dim_location`, `dim_payment` | `database.refresh_marts` (`sql/07`), full rebuild after every successful run | one row per pickup date × pickup zone |
+| dashboard (`streamlit_app.py`) | `mart_daily_zone_trips` + `pipeline_run` only | `metrics.summarise`, `serving.get_freshness` | any roll-up of the mart's grain |
 | `data/samples/yellow_tripdata_2026-01_sample100k.csv` | 100,000 rows of the January raw parquet | one-off extract (the script is not in this repo) | one row per trip, raw columns, no validation |
 | BigQuery `trips_sample` | the sample CSV | manual console load | same as the sample CSV |
 
