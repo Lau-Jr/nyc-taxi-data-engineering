@@ -65,6 +65,14 @@ chosen per dimension, based on how each dimension's data becomes known:
 
 ## Referential integrity is enforced by the database, not assumed by the loader
 
+> **Phase 9 update.** The six `FOREIGN KEY` constraints described below were removed from
+> `sql/03_create_fact.sql`. Checking them row by row made the fact insert about 2× slower.
+> The same rule is now enforced once per batch by
+> `src/database.py::check_fact_foreign_keys`, which refuses the whole batch before anything
+> is written. Integrity is still checked, not assumed, but by the loader rather than the
+> database. See [docs/phase9/performance_report.md](../phase9/performance_report.md). The
+> logical relationships, and the nullable `rate_code_key`, are unchanged.
+
 Every foreign key in `fact_trip` (`sql/03_create_fact.sql`) is declared with a `FOREIGN KEY
 ... REFERENCES` constraint, verified against DuckDB directly (attempting to insert a fact row
 against a nonexistent dimension key raises a `Constraint Error`). `rate_code_key` is the one
