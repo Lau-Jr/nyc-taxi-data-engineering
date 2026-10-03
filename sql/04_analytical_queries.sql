@@ -1,6 +1,10 @@
 -- Phase 2 demonstration queries: each joins fact_trip against at least one dimension,
 -- to answer "why not one big table?" — the descriptive attributes (payment/vendor/date
 -- descriptions) live once in the dimension and are looked up, not repeated per trip.
+--
+-- Phase 7 note: these are schema demonstrations, NOT the published numbers. Queries 1 and 2
+-- filter is_anomaly = FALSE, which drops ~32% of January trips and ~$34.9M of revenue.
+-- Published metrics are defined in metrics.md and served from mart_daily_zone_trips.
 
 -- 1. Revenue and trip volume by day of week (excludes flagged anomalies from Problem B).
 SELECT
