@@ -1,6 +1,7 @@
-.PHONY: install ingest test dashboard features baseline clean
+.PHONY: install ingest test dashboard features baseline profile clean
 
 MONTH ?= 2026-01
+LABEL ?= latest
 
 install:
 	pip install -r requirements.txt
@@ -16,6 +17,9 @@ features:
 
 baseline:
 	python -m src.baseline
+
+profile:
+	python -m src.profile_pipeline --month $(MONTH) --label $(LABEL)
 
 test:
 	python -m pytest tests/ -v
